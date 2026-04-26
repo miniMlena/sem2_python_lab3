@@ -5,10 +5,14 @@ import typer
 from typer import Typer
 from src.base_classes.task import Task
 from src.base_classes.task_manager import TaskManager
+from src.base_classes.task_queue import TaskQueue
 from src.sources.registry import REGISTRY
 
 # хранилище задач (для демонстрации)
 tasks_storage: Dict[str, Task] = {}
+
+# Глобальная очередь (создаётся один раз)
+task_queue: TaskQueue | None = None
 
 cli = Typer(add_help_option=False, add_completion=False)
 
@@ -144,7 +148,30 @@ def display_instructions() -> None:
 10. create - Создает новую задачу в интерактивном режиме
     Пример: create
 
-11. exit - Выход из программы
+11. queue-init - Создание очереди с указанными источниками
+    Аргументами являются jsonl-файлы. Очередь единая на всю программу, при повторном вводе этой команды очередь перезаписывается.
+    Пример:
+    queue-init example_1.jsonl
+          
+12. queue-demo - Быстро демонстрирует основные операции с очередью
+    Пример: queue-demo
+          
+13. queue-filter - Фильтрует задачи в очереди по указанным критериям
+    Опции:
+    --status - фильтр по статусу
+    --min_priority - фильтр по минимальному приоритету
+    --author - фильтр по автору
+    --contains - фильтр по подстроке в названии задчи
+    Опции можно комбинировать.
+    Примеры:
+    queue-filter --contains дз
+    queue-filter --author kate --status done
+    queue-filter --min-priority 2 --author milena --contains от
+          
+14. queue-process - Демонстрирует потоковую обработку задач
+    Пример: queue-process
+
+15. exit - Выход из программы
     Пример: exit
 
 """)
@@ -357,6 +384,111 @@ def create_task_interactive() -> None:
         print(f"Ошибка при создании задачи: {e}")
 
 
+@cli.command("queue-init")
+def initialize_queue(
+    jsonl: list[Path] = typer.Argument(None, help="JSONL файлы"),
+) -> None:
+    """Инициализирует TaskQueue из выбранных источников"""
+    global task_queue
+    
+    if not jsonl:
+        print("Ошибка: Укажите JSONL файлы как источники для очереди")
+        return
+    
+    if jsonl is None:
+        jsonl = []
+    
+    sources = build_sources(False, jsonl)
+    manager = TaskManager(sources)
+    task_queue = TaskQueue(manager)
+    print("TaskQueue успешно инициализирована!")
+
+
+@cli.command("queue-demo")
+def demonstrate_queue() -> None:
+    """Быстро демонстрирует возможности TaskQueue"""
+    global task_queue
+    if task_queue is None:
+        print("Сначала выполните: queue-init")
+        return
+    
+    print("\n1) Первый проход по очереди (ленивый):")
+    for task in task_queue:
+        title_display = task.title[:27] + "..." if len(task.title) > 30 else task.title
+        print(f"{task.id:<15} {title_display:<30} {task.author:<15} {str(task.status):<15} {task.priority} ({task.priority_label})")
+
+    print("\n2) Повторный проход по той же очереди (из кэша), на примере функции sum:")
+    count = sum(1 for _ in task_queue)
+    print(f"    Всего задач в очереди: {count}")
+
+    print("\n3) Ленивый фильтр (на примере приоритета):")
+    high = list(task_queue.filter_by_priority(2, 2))
+    print(f"    Задач со средним приоритетом: {len(high)}")
+
+    print("\n4) Потоковая обработка:")
+    print("    Используйте команду 'queue-process' для демонстрации")
+
+    print(f"\nТекущее состояние: {task_queue}")
+
+
+@cli.command("queue-filter")
+def filter_queue(
+    status: Optional[str] = typer.Option(None, "--status"),
+    min_priority: Optional[int] = typer.Option(None, "--min-priority"),
+    author: Optional[str] = typer.Option(None, "--author"),
+    contains: Optional[str] = typer.Option(None, "--contains"),
+) -> None:
+    """Фильтрация задач через TaskQueue"""
+    global task_queue
+    if task_queue is None:
+        print("Сначала выполните: queue-init")
+        return
+
+    result = task_queue
+
+    if status:
+        result = list(task_queue.filter_by_status(status))
+    if min_priority is not None:
+        result = [t for t in list(task_queue.filter_by_priority(min_priority=min_priority)) if t in result]
+    if author:
+        result = [t for t in list(task_queue.filter_by_author(author)) if t in result]
+    if contains:
+        result = [t for t in list(task_queue.filter_by_title_contains(contains))if t in result]
+
+    tasks = list(result)
+    print(f"\nНайдено задач: {len(tasks)}")
+    
+    for task in tasks:
+        title_display = task.title[:27] + "..." if len(task.title) > 30 else task.title
+        print(f"{task.id:<15} {title_display:<30} {task.author:<15} {str(task.status):<15} {task.priority} ({task.priority_label})")
+
+
+@cli.command("queue-process")
+def queue_process_demo() -> None:
+    """Демонстрирует потоковую обработку задач"""
+    global task_queue
+    if task_queue is None:
+        print("Сначала выполните: queue-init")
+        return
+
+    print("\n1) Потоковая обработка: извлекаем id, название и приоритет")
+    for item in task_queue.process(lambda t: (t.id, t.title, t.priority)):
+        print(f"    {item}")
+
+    print("\n2) Подсчёт задач по приоритету через sum (ленивая обработка):")
+    priority_sum = sum(
+        task.priority 
+        for task in task_queue.filter_by_priority(min_priority=3)
+    )
+    print(f"    Сумма приоритетов задач с приоритетом >= 3: {priority_sum}")
+
+    print("\n3) Преобразование в словарь")
+    dicts = list(task_queue.process(lambda t: t.to_dict()))
+    print(f"    Преобразовано в словари {len(dicts)} задач:")
+    for d in dicts:
+        print(d)
+
+
 def main_loop() -> None:
     """Главный цикл программы"""
     print("Добро пожаловать в систему управления задачами!")
@@ -396,6 +528,10 @@ def main_loop() -> None:
             temp_cli.command("info")(task_info)
             temp_cli.command("list")(list_all_tasks)
             temp_cli.command("create")(create_task_interactive)
+            temp_cli.command("queue-init")(initialize_queue)
+            temp_cli.command("queue-demo")(demonstrate_queue)
+            temp_cli.command("queue-filter")(filter_queue)
+            temp_cli.command("queue-process")(queue_process_demo)
 
             try:
                 sys.argv = ["temp_cli"] + [cmd] + args
