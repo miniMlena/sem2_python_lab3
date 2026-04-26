@@ -1,11 +1,12 @@
 from collections.abc import Iterable, Iterator, Callable
+from typing import Any
 from src.base_classes.task import Task
 from src.base_classes.enums import TaskStatus
 from src.base_classes.task_manager import TaskManager
 
 
 class TaskQueueIterator(Iterator[Task]):
-    """Итератор с поддержкой ленивого кэширования."""
+    """Итератор с поддержкой ленивого кэширования"""
     def __init__(self, queue: "TaskQueue"):
         self._queue = queue
         self._index = 0
@@ -17,7 +18,7 @@ class TaskQueueIterator(Iterator[Task]):
             task = self._queue._cache[self._index]
             self._index += 1
             return task
-        # если источник полностью исчерпан, завершаем
+
         if self._source_exhausted or self._queue._fully_consumed:
             raise StopIteration
 
@@ -35,8 +36,8 @@ class TaskQueueIterator(Iterator[Task]):
 
 class TaskQueue:
     """
-    Очередь задач с поддержкой многократной итерации, ленивых фильтров.
-    Использует lazy caching для соответствия требованиям лабораторной.
+    Очередь задач с поддержкой многократной итерации, ленивых фильтров
+    и потоковой обработки.
     """
     def __init__(self, manager: "TaskManager"):
         self._manager: "TaskManager" = manager
@@ -45,29 +46,19 @@ class TaskQueue:
         self._task_iterator: Iterator[Task] | None = None
 
     def __iter__(self) -> Iterator[Task]:
-        """
-        Важно: каждый вызов __iter__() возвращает новый итератор.
-        При этом переиспользуем уже накопленный кэш.
-        """
         if self._task_iterator is None and not self._fully_consumed:
-            self._task_iterator = iter(self._manager.iter_tasks())  # важно использовать iter()
-
+            self._task_iterator = iter(self._manager.iter_tasks())
         return TaskQueueIterator(self)
 
-    # ====================== ЛЕНИВЫЕ ФИЛЬТРЫ ======================
-
     def filter(self, predicate: Callable[[Task], bool]) -> Iterable[Task]:
-        """Универсальный ленивый фильтр."""
-        for task in self:          # здесь используется наш __iter__
+        """Ленивый фильтр (через генератор)"""
+        for task in self:
             if predicate(task):
                 yield task
 
     def filter_by_status(self, status: TaskStatus | str) -> Iterable[Task]:
         if isinstance(status, str):
-            try:
-                status = TaskStatus(status.upper())
-            except ValueError:
-                status = TaskStatus.PENDING
+            status = TaskStatus(status.lower())
 
         return self.filter(lambda t: t.status == status)
 
@@ -82,8 +73,6 @@ class TaskQueue:
         substring_lower = substring.lower()
         return self.filter(lambda t: substring_lower in t.title.lower())
 
-    # ====================== Удобные методы ======================
-
     def pending(self) -> Iterable[Task]:
         return self.filter_by_status(TaskStatus.PENDING)
 
@@ -96,13 +85,29 @@ class TaskQueue:
     def high_priority(self) -> Iterable[Task]:
         return self.filter_by_priority(min_priority=4)
 
+    def process(self, processor: Callable[[Task], Any] = lambda x: x) -> Iterable[Any]:
+        """
+        Потоковая обработка задач, применяет функцию processor к
+        каждой задаче через генератор (по умолчанию просто выдает задачи)
+        
+        Пример использования:
+            for result in queue.process(lambda t: (t.id, t.title, t.status)):
+                ...
+                
+        Можно комбинировать с фильтрами:
+            for res in queue.pending().process(task_to_dict):
+                ...
+        """
+        for task in self:
+            yield processor(task)
+
     def __repr__(self) -> str:
         cached = len(self._cache)
-        status = " (fully consumed)" if self._fully_consumed else " (+ source available)"
-        return f"TaskQueue({cached} tasks cached{status})"
+        status = " (источник полностью обработан)" if self._fully_consumed else " (+ недообработанный источник)"
+        return f"Количество задач в очереди: ({cached} кэшировано{status})"
 
     def reset(self) -> None:
-        """Сбрасывает кэш"""
+        """Сброс кэша (для тестов и повторных экспериментов)"""
         self._cache.clear()
         self._fully_consumed = False
         self._task_iterator = None
